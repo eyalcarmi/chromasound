@@ -58,6 +58,41 @@ ColorSoundApp/
 └── README.md
 ```
 
-## Original artifact
+## Deploy to Vercel
 
-The app logic was adapted from `color_instrument (1).tsx`, a Claude Artifact export. It has been integrated into a standard Vite + React + TypeScript project.
+### Option A — Import from GitHub (recommended)
+
+1. Push the repo to GitHub (see below).
+2. Go to [vercel.com/new](https://vercel.com/new).
+3. Import the `chromasound` repository.
+4. Vercel auto-detects Vite. Confirm:
+   - **Build command:** `npm run build`
+   - **Output directory:** `dist`
+5. Click **Deploy**.
+
+### Option B — Vercel CLI
+
+```bash
+npx vercel login
+npx vercel --prod
+```
+
+Or use the helper script:
+
+```bash
+./scripts/deploy-vercel.sh --prod
+```
+
+## Publish to GitHub
+
+Install [Xcode Command Line Tools](https://developer.apple.com/xcode/resources/) (provides `git`) if prompted, then:
+
+```bash
+# Authenticate with GitHub (one time)
+gh auth login
+
+# Create repo and push
+./scripts/publish-github.sh chromasound
+```
+
+The script creates a public repo named `chromasound` and pushes `main`.
