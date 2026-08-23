@@ -83,13 +83,6 @@ function lightnessToCutoff(l: number) {
   return 200 + Math.pow(l / 100, 1.4) * 8800;
 }
 
-function drumLabel(h: number) {
-  if (h < 45 || h >= 315) return "Kick";
-  if (h < 150) return "Snare";
-  if (h < 255) return "Hi-hat";
-  return "Tom";
-}
-
 const compressors = new WeakMap<AudioContext, DynamicsCompressorNode>();
 
 function getCompressor(ctx: AudioContext) {
@@ -321,86 +314,6 @@ function stopOrgan(ctx: AudioContext) {
     organNodes.master.gain.setTargetAtTime(0, ctx.currentTime, 0.12);
 }
 
-function playDrums(
-  ctx: AudioContext,
-  h: number,
-  s: number,
-  lnt: ThrottleRef,
-) {
-  const now = ctx.currentTime;
-  if (lnt.current && now - lnt.current < 0.12) return;
-  lnt.current = now;
-  const comp = getCompressor(ctx);
-  const vol = 0.15 + (s / 100) * 0.3;
-  if (h < 45 || h >= 315) {
-    const o = ctx.createOscillator(),
-      g = ctx.createGain();
-    o.type = "sine";
-    o.frequency.setValueAtTime(150, now);
-    o.frequency.exponentialRampToValueAtTime(40, now + 0.3);
-    g.gain.setValueAtTime(vol * 2, now);
-    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
-    o.connect(g);
-    g.connect(comp);
-    o.start(now);
-    o.stop(now + 0.4);
-  } else if (h < 150) {
-    const buf = ctx.createBuffer(1, ctx.sampleRate * 0.15, ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    const f = ctx.createBiquadFilter();
-    f.type = "bandpass";
-    f.frequency.value = 1800;
-    f.Q.value = 0.8;
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(vol * 1.1, now);
-    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.15);
-    src.connect(f);
-    f.connect(g);
-    g.connect(comp);
-    src.start(now);
-    const o = ctx.createOscillator(),
-      g2 = ctx.createGain();
-    o.frequency.value = 190;
-    g2.gain.setValueAtTime(vol * 0.4, now);
-    g2.gain.exponentialRampToValueAtTime(0.0001, now + 0.1);
-    o.connect(g2);
-    g2.connect(comp);
-    o.start(now);
-    o.stop(now + 0.1);
-  } else if (h < 255) {
-    const buf = ctx.createBuffer(1, ctx.sampleRate * 0.07, ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    const f = ctx.createBiquadFilter();
-    f.type = "highpass";
-    f.frequency.value = 7000;
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(vol * 0.7, now);
-    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.07);
-    src.connect(f);
-    f.connect(g);
-    g.connect(comp);
-    src.start(now);
-  } else {
-    const o = ctx.createOscillator(),
-      g = ctx.createGain();
-    o.type = "sine";
-    o.frequency.setValueAtTime(210, now);
-    o.frequency.exponentialRampToValueAtTime(75, now + 0.25);
-    g.gain.setValueAtTime(vol * 1.6, now);
-    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.3);
-    o.connect(g);
-    g.connect(comp);
-    o.start(now);
-    o.stop(now + 0.3);
-  }
-}
-
 function drawColorGrid(canvas: HTMLCanvasElement, W: number, H: number) {
   canvas.width = W;
   canvas.height = H;
@@ -424,7 +337,7 @@ function drawColorGrid(canvas: HTMLCanvasElement, W: number, H: number) {
     }
 }
 
-const INSTRUMENTS = ["Synth", "Piano", "Bass", "Drums", "Organ"] as const;
+const INSTRUMENTS = ["Synth", "Piano", "Bass", "Organ"] as const;
 type Instrument = (typeof INSTRUMENTS)[number];
 
 function getAudioContextClass() {
@@ -432,6 +345,52 @@ function getAudioContextClass() {
     window.AudioContext ||
     (window as Window & { webkitAudioContext?: typeof AudioContext })
       .webkitAudioContext
+  );
+}
+
+function InstrumentBar({
+  instrument,
+  onSelect,
+  onUploadClick,
+  fileInputRef,
+  onUpload,
+}: {
+  instrument: Instrument;
+  onSelect: (inst: Instrument) => void;
+  onUploadClick: () => void;
+  fileInputRef: React.RefObject<HTMLInputElement | null>;
+  onUpload: (e: React.ChangeEvent<HTMLInputElement>) => void;
+}) {
+  return (
+    <div className="instrument-row">
+      {INSTRUMENTS.map((inst) => {
+        const active = instrument === inst;
+        return (
+          <button
+            key={inst}
+            type="button"
+            onClick={() => onSelect(inst)}
+            className={`instrument-btn ${active ? "instrument-btn--active" : "instrument-btn--idle"}`}
+          >
+            {inst}
+          </button>
+        );
+      })}
+      <button
+        type="button"
+        onClick={onUploadClick}
+        className="instrument-btn instrument-btn--idle"
+      >
+        IMG
+      </button>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        onChange={onUpload}
+        style={{ display: "none" }}
+      />
+    </div>
   );
 }
 
@@ -493,6 +452,16 @@ export default function App() {
       document.documentElement.style.overflow = "";
     };
   }, [isLandscape]);
+
+  useEffect(() => {
+    const W = isLandscape
+      ? window.innerWidth
+      : Math.min(window.innerWidth, 640);
+    const H = isLandscape
+      ? window.innerHeight
+      : Math.round(Math.min(window.innerWidth, 640) * 0.625);
+    redrawCanvas(W, H);
+  }, [isLandscape, redrawCanvas]);
 
   const initAudio = useCallback(() => {
     if (audioReadyRef.current) return;
@@ -579,7 +548,6 @@ export default function App() {
     if (inst === "Synth") playSynth(ctx, freq, s, l, nodes);
     else if (inst === "Piano") playPiano(ctx, freq, s, l, lastNoteTime.current);
     else if (inst === "Bass") playBass(ctx, freq, s, l, lastNoteTime.current);
-    else if (inst === "Drums") playDrums(ctx, Math.round(h), s, lastNoteTime.current);
     else if (inst === "Organ") playOrgan(ctx, freq, s, l, lastNoteTime.current);
   }, []);
 
@@ -630,8 +598,6 @@ export default function App() {
     [silenceAll],
   );
 
-  const isDrums = instrument === "Drums";
-
   const canvasProps = {
     ref: canvasRef,
     onMouseDown: handleMouseDown,
@@ -670,7 +636,6 @@ export default function App() {
             right: 0,
             zIndex: 20,
             display: "flex",
-            gap: 4,
             padding: "5px 8px",
             background: "rgba(0,0,0,0.6)",
             justifyContent: "center",
@@ -678,51 +643,12 @@ export default function App() {
             backdropFilter: "blur(4px)",
           }}
         >
-          {INSTRUMENTS.map((inst) => {
-            const active = instrument === inst;
-            return (
-              <button
-                key={inst}
-                onClick={() => setInstrument(inst)}
-                style={{
-                  padding: "4px 11px",
-                  borderRadius: 4,
-                  fontSize: 10,
-                  letterSpacing: "0.05em",
-                  border: `1px solid ${active ? "#7c5cbf" : "#333"}`,
-                  background: active ? "#2a1f3d" : "transparent",
-                  color: active ? "#c4a8ff" : "#666",
-                  cursor: "pointer",
-                  fontFamily: "inherit",
-                }}
-              >
-                {inst.toUpperCase()}
-              </button>
-            );
-          })}
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            style={{
-              padding: "4px 11px",
-              borderRadius: 4,
-              fontSize: 10,
-              letterSpacing: "0.05em",
-              border: "1px solid #333",
-              background: "transparent",
-              color: "#555",
-              cursor: "pointer",
-              fontFamily: "inherit",
-              marginLeft: 8,
-            }}
-          >
-            IMG
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            onChange={handleUpload}
-            style={{ display: "none" }}
+          <InstrumentBar
+            instrument={instrument}
+            onSelect={setInstrument}
+            onUploadClick={() => fileInputRef.current?.click()}
+            fileInputRef={fileInputRef}
+            onUpload={handleUpload}
           />
         </div>
 
@@ -761,10 +687,10 @@ export default function App() {
           {info ? (
             <>
               <span style={{ color: "#fff", fontWeight: 700, fontSize: 13 }}>
-                {isDrums ? drumLabel(info.h) : `${info.note}${info.octave}`}
+                {`${info.note}${info.octave}`}
               </span>
               <span>OCT {info.octaveF.toFixed(1)}</span>
-              <span>{isDrums ? `${info.h}°` : `${info.freq} Hz`}</span>
+              <span>{`${info.freq} Hz`}</span>
               <span
                 style={{ display: "flex", alignItems: "center", gap: 5 }}
               >
@@ -826,64 +752,13 @@ export default function App() {
         </p>
       </div>
 
-      <div
-        style={{
-          display: "flex",
-          gap: 6,
-          flexWrap: "wrap",
-          justifyContent: "center",
-        }}
-      >
-        {INSTRUMENTS.map((inst) => {
-          const active = instrument === inst;
-          return (
-            <button
-              key={inst}
-              onClick={() => setInstrument(inst)}
-              style={{
-                padding: "7px 16px",
-                borderRadius: 6,
-                fontSize: 12,
-                letterSpacing: "0.05em",
-                border: `1px solid ${active ? "#7c5cbf" : "#2a2a2a"}`,
-                background: active ? "#2a1f3d" : "#141414",
-                color: active ? "#c4a8ff" : "#777",
-                cursor: "pointer",
-                transition: "all 0.15s",
-                fontFamily: "inherit",
-              }}
-            >
-              {inst.toUpperCase()}
-            </button>
-          );
-        })}
-      </div>
-
-      <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          style={{
-            cursor: "pointer",
-            padding: "8px 18px",
-            borderRadius: 6,
-            border: "1px solid #333",
-            fontSize: 13,
-            color: "#bbb",
-            background: "#1a1a1a",
-            letterSpacing: "0.04em",
-            fontFamily: "inherit",
-          }}
-        >
-          Upload Image
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          onChange={handleUpload}
-          style={{ display: "none" }}
-        />
-      </div>
+      <InstrumentBar
+        instrument={instrument}
+        onSelect={setInstrument}
+        onUploadClick={() => fileInputRef.current?.click()}
+        fileInputRef={fileInputRef}
+        onUpload={handleUpload}
+      />
 
       <div
         style={{
@@ -921,12 +796,8 @@ export default function App() {
             value: info ? `${info.h}°  ${info.s}%  ${info.l}%` : "—",
           },
           {
-            label: isDrums ? "DRUM" : "NOTE",
-            value: info
-              ? isDrums
-                ? drumLabel(info.h)
-                : `${info.note}${info.octave}`
-              : "—",
+            label: "NOTE",
+            value: info ? `${info.note}${info.octave}` : "—",
             big: true,
           },
           {
@@ -936,8 +807,8 @@ export default function App() {
             accent: "#80d4b0",
           },
           {
-            label: isDrums ? "HUE" : "FREQ",
-            value: info ? (isDrums ? `${info.h}°` : `${info.freq} Hz`) : "—",
+            label: "FREQ",
+            value: info ? `${info.freq} Hz` : "—",
           },
         ].map(({ label, value, dot, big, accent }) => (
           <div
@@ -998,9 +869,7 @@ export default function App() {
           margin: 0,
         }}
       >
-        {isDrums
-          ? "Red/Orange → Kick · Yellow/Green → Snare · Cyan/Blue → Hi-hat · Purple → Tom"
-          : "Hue → Note · Lightness → Octave (1–6) · Saturation → Timbre & Volume"}
+        Hue → Note · Lightness → Octave (1–6) · Saturation → Timbre & Volume
       </p>
       <p
         style={{
