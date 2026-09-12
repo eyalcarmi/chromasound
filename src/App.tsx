@@ -34,6 +34,15 @@ type OrganNodes = {
   lp: BiquadFilterNode;
 };
 
+const RELEASE_SEC = 0.05;
+
+type GatedVoice = {
+  gain: GainNode;
+  fb?: GainNode;
+  nodes: AudioNode[];
+  released: boolean;
+};
+
 function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
   r /= 255;
   g /= 255;
@@ -99,6 +108,13 @@ function getCompressor(ctx: AudioContext) {
   return c;
 }
 
+function fadeGain(gain: AudioParam, now: number, seconds = RELEASE_SEC) {
+  gain.cancelScheduledValues(now);
+  const current = Math.max(gain.value, 0.0001);
+  gain.setValueAtTime(current, now);
+  gain.exponentialRampToValueAtTime(0.0001, now + seconds);
+}
+
 function playSynth(
   ctx: AudioContext,
   freq: number,
@@ -108,7 +124,8 @@ function playSynth(
 ) {
   const now = ctx.currentTime;
   nodes.osc.frequency.setTargetAtTime(freq, now, 0.03);
-  nodes.gain.gain.setTargetAtTime(0.08 + (s / 100) * 0.28, now, 0.03);
+  nodes.gain.gain.cancelScheduledValues(now);
+  nodes.gain.gain.setTargetAtTime(0.08 + (s / 100) * 0.28, now, 0.02);
   nodes.filter.frequency.setTargetAtTime(lightnessToCutoff(l), now, 0.04);
 }
 
@@ -172,6 +189,70 @@ function playPiano(
   ns.start(now);
 }
 
+function makeDriveCurve(amount: number) {
+  const n = 256;
+  const curve = new Float32Array(n);
+  const k = Math.max(0.2, amount);
+  for (let i = 0; i < n; i++) {
+    const x = (i * 2) / n - 1;
+    curve[i] = ((1 + k) * x) / (1 + k * Math.abs(x));
+  }
+  return curve;
+}
+
+function exciteDelay(
+  ctx: AudioContext,
+  delay: DelayNode,
+  freq: number,
+  amp: number,
+) {
+  const period = Math.max(8, Math.floor(ctx.sampleRate / Math.max(freq, 40)));
+  const buf = ctx.createBuffer(1, period, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < period; i++) {
+    const window = Math.pow(1 - i / period, 0.35);
+    data[i] = (Math.random() * 2 - 1) * amp * window;
+  }
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(delay);
+  src.start();
+  return src;
+}
+
+const gatedVoices: GatedVoice[] = [];
+
+function registerVoice(voice: GatedVoice) {
+  gatedVoices.push(voice);
+}
+
+function disconnectNodes(nodes: AudioNode[]) {
+  for (const node of nodes) {
+    try {
+      node.disconnect();
+    } catch {
+      /* already disconnected */
+    }
+  }
+}
+
+function releaseVoice(voice: GatedVoice, ctx: AudioContext) {
+  if (voice.released) return;
+  voice.released = true;
+  const now = ctx.currentTime;
+  if (voice.fb) fadeGain(voice.fb.gain, now, 0.02);
+  fadeGain(voice.gain.gain, now);
+  window.setTimeout(
+    () => disconnectNodes(voice.nodes),
+    Math.round((RELEASE_SEC + 0.04) * 1000),
+  );
+}
+
+function releaseGatedVoices(ctx: AudioContext) {
+  const voices = gatedVoices.splice(0);
+  for (const voice of voices) releaseVoice(voice, ctx);
+}
+
 function playBass(
   ctx: AudioContext,
   freq: number,
@@ -180,62 +261,58 @@ function playBass(
   lnt: ThrottleRef,
 ) {
   const now = ctx.currentTime;
-  if (lnt.current && now - lnt.current < 0.11) return;
-  const bassFreq = freq / 2;
-  const prev = lnt._freq ?? bassFreq;
+  if (lnt.current && now - lnt.current < 0.09) return;
   lnt.current = now;
-  lnt._freq = bassFreq;
-  const comp = getCompressor(ctx);
-  const vol = 0.18 + (s / 100) * 0.16;
-  const dur = 0.7;
-  const cutoff = Math.min(lightnessToCutoff(l) * 0.55, 1200);
-  const layers = [
-    { type: "sine" as OscillatorType, ratio: 1, amp: 1.0, glide: 0.08 },
-    { type: "triangle" as OscillatorType, ratio: 2, amp: 0.35, glide: 0.07 },
-    { type: "sine" as OscillatorType, ratio: 3, amp: 0.1, glide: 0.06 },
-  ];
+  const bassFreq = Math.max(freq / 2, 32);
+  const delay = ctx.createDelay(0.08);
+  delay.delayTime.value = 1 / bassFreq;
+  const loopFilter = ctx.createBiquadFilter();
+  loopFilter.type = "lowpass";
+  loopFilter.frequency.value = Math.min(700 + (l / 100) * 900, 1600);
+  loopFilter.Q.value = 0.35;
+  const fb = ctx.createGain();
+  fb.gain.value = 0.9;
   const body = ctx.createBiquadFilter();
   body.type = "peaking";
-  body.frequency.value = 180;
-  body.gain.value = 5;
-  body.Q.value = 2;
-  const lp = ctx.createBiquadFilter();
-  lp.type = "lowpass";
-  lp.frequency.value = cutoff;
-  lp.Q.value = 0.6;
+  body.frequency.value = 110;
+  body.gain.value = 3.5;
+  body.Q.value = 0.9;
+  const lowMid = ctx.createBiquadFilter();
+  lowMid.type = "peaking";
+  lowMid.frequency.value = 420;
+  lowMid.gain.value = 3.2;
+  lowMid.Q.value = 0.85;
+  const hp = ctx.createBiquadFilter();
+  hp.type = "highpass";
+  hp.frequency.value = 38;
   const shelf = ctx.createBiquadFilter();
   shelf.type = "highshelf";
-  shelf.frequency.value = 1200;
-  shelf.gain.value = -9;
-  layers.forEach(({ type, ratio, amp, glide }) => {
-    const o = ctx.createOscillator(),
-      g = ctx.createGain();
-    o.type = type;
-    o.frequency.value = prev * ratio;
-    o.frequency.setTargetAtTime(bassFreq * ratio, now, glide);
-    g.gain.setValueAtTime(0, now);
-    g.gain.linearRampToValueAtTime(vol * amp, now + 0.014);
-    g.gain.setTargetAtTime(vol * amp * 0.5, now + 0.014, 0.06);
-    g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-    o.connect(g);
-    g.connect(body);
-    o.start(now);
-    o.stop(now + dur + 0.05);
+  shelf.frequency.value = 1400;
+  shelf.gain.value = -8;
+  const out = ctx.createGain();
+  const vol = 0.26 + (s / 100) * 0.12;
+  const dur = 0.55 + (l / 100) * 0.25;
+  out.gain.setValueAtTime(0.0001, now);
+  out.gain.linearRampToValueAtTime(vol, now + 0.012);
+  out.gain.setTargetAtTime(vol * 0.45, now + 0.05, 0.08);
+  out.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+  fb.gain.setTargetAtTime(0.62, now + 0.18, 0.12);
+  delay.connect(loopFilter);
+  loopFilter.connect(fb);
+  fb.connect(delay);
+  delay.connect(hp);
+  hp.connect(body);
+  body.connect(lowMid);
+  lowMid.connect(shelf);
+  shelf.connect(out);
+  out.connect(getCompressor(ctx));
+  exciteDelay(ctx, delay, bassFreq, 0.9);
+  registerVoice({
+    gain: out,
+    fb,
+    released: false,
+    nodes: [delay, loopFilter, fb, body, lowMid, hp, shelf, out],
   });
-  const sub = ctx.createOscillator(),
-    subG = ctx.createGain();
-  sub.type = "sine";
-  sub.frequency.value = bassFreq / 2;
-  subG.gain.setValueAtTime(0, now);
-  subG.gain.linearRampToValueAtTime(vol * 0.18, now + 0.025);
-  subG.gain.exponentialRampToValueAtTime(0.0001, now + dur * 0.5);
-  sub.connect(subG);
-  subG.connect(body);
-  sub.start(now);
-  sub.stop(now + dur * 0.5 + 0.05);
-  body.connect(lp);
-  lp.connect(shelf);
-  shelf.connect(comp);
 }
 
 let organNodes: OrganNodes | null = null;
@@ -310,8 +387,162 @@ function playOrgan(
 }
 
 function stopOrgan(ctx: AudioContext) {
-  if (organNodes && organNodes.ctx === ctx)
-    organNodes.master.gain.setTargetAtTime(0, ctx.currentTime, 0.12);
+  if (!organNodes || organNodes.ctx !== ctx) return;
+  fadeGain(organNodes.master.gain, ctx.currentTime);
+}
+
+function playAcousticGuitar(
+  ctx: AudioContext,
+  freq: number,
+  s: number,
+  l: number,
+  lnt: ThrottleRef,
+) {
+  const now = ctx.currentTime;
+  if (lnt.current && now - lnt.current < 0.075) return;
+  lnt.current = now;
+  const delayTime = 1 / Math.max(freq, 50);
+  const delay = ctx.createDelay(0.06);
+  delay.delayTime.value = delayTime;
+  const loopFilter = ctx.createBiquadFilter();
+  loopFilter.type = "lowpass";
+  loopFilter.frequency.value = Math.min(1400 + freq * 1.8, 3800);
+  loopFilter.Q.value = 0.25;
+  const fb = ctx.createGain();
+  fb.gain.value = 0.86;
+  const body = ctx.createBiquadFilter();
+  body.type = "peaking";
+  body.frequency.value = 165;
+  body.gain.value = 5;
+  body.Q.value = 1.3;
+  const wood = ctx.createBiquadFilter();
+  wood.type = "peaking";
+  wood.frequency.value = 430;
+  wood.gain.value = 3.2;
+  wood.Q.value = 1.05;
+  const air = ctx.createBiquadFilter();
+  air.type = "highshelf";
+  air.frequency.value = 3200;
+  air.gain.value = -5.5;
+  const out = ctx.createGain();
+  const vol = 0.28 + (s / 100) * 0.16;
+  const dur = 0.42 + (l / 100) * 0.22;
+  out.gain.setValueAtTime(vol, now);
+  out.gain.setTargetAtTime(vol * 0.35, now + 0.04, 0.05);
+  out.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+  fb.gain.setTargetAtTime(0.55, now + 0.12, 0.1);
+  delay.connect(loopFilter);
+  loopFilter.connect(fb);
+  fb.connect(delay);
+  delay.connect(body);
+  body.connect(wood);
+  wood.connect(air);
+  air.connect(out);
+  out.connect(getCompressor(ctx));
+  exciteDelay(ctx, delay, freq, 0.95);
+  const pickLen = Math.floor(ctx.sampleRate * 0.004);
+  const pickBuf = ctx.createBuffer(1, pickLen, ctx.sampleRate);
+  const pd = pickBuf.getChannelData(0);
+  for (let i = 0; i < pickLen; i++)
+    pd[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / pickLen, 5);
+  const pick = ctx.createBufferSource();
+  pick.buffer = pickBuf;
+  const pickG = ctx.createGain();
+  pickG.gain.value = vol * 0.35;
+  const pickBp = ctx.createBiquadFilter();
+  pickBp.type = "bandpass";
+  pickBp.frequency.value = Math.min(freq * 4, 2400);
+  pickBp.Q.value = 0.7;
+  pick.connect(pickBp);
+  pickBp.connect(pickG);
+  pickG.connect(getCompressor(ctx));
+  pick.start(now);
+}
+
+function playElectricGuitar(
+  ctx: AudioContext,
+  freq: number,
+  s: number,
+  l: number,
+  lnt: ThrottleRef,
+) {
+  const now = ctx.currentTime;
+  if (lnt.current && now - lnt.current < 0.065) return;
+  lnt.current = now;
+  const f = Math.max(freq, 70);
+  const delay = ctx.createDelay(0.06);
+  delay.delayTime.value = 1 / f;
+  const loopFilter = ctx.createBiquadFilter();
+  loopFilter.type = "lowpass";
+  loopFilter.frequency.value = Math.min(2800 + (l / 100) * 2200, 5200);
+  loopFilter.Q.value = 0.3;
+  const fb = ctx.createGain();
+  fb.gain.value = 0.84;
+  const drive = ctx.createWaveShaper();
+  drive.curve = makeDriveCurve(0.45);
+  const hp = ctx.createBiquadFilter();
+  hp.type = "highpass";
+  hp.frequency.value = 90;
+  const scoop = ctx.createBiquadFilter();
+  scoop.type = "peaking";
+  scoop.frequency.value = 800;
+  scoop.gain.value = -4.5;
+  scoop.Q.value = 0.85;
+  const presence = ctx.createBiquadFilter();
+  presence.type = "peaking";
+  presence.frequency.value = 3400;
+  presence.gain.value = 3.2;
+  presence.Q.value = 0.7;
+  const cab = ctx.createBiquadFilter();
+  cab.type = "lowpass";
+  cab.frequency.value = 5600;
+  cab.Q.value = 0.45;
+  const out = ctx.createGain();
+  const vol = 0.2 + (s / 100) * 0.12;
+  const dur = 0.38 + (l / 100) * 0.2;
+  out.gain.setValueAtTime(vol, now);
+  out.gain.setTargetAtTime(vol * 0.4, now + 0.03, 0.05);
+  out.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+  fb.gain.setTargetAtTime(0.58, now + 0.14, 0.1);
+  delay.connect(loopFilter);
+  loopFilter.connect(fb);
+  fb.connect(delay);
+  delay.connect(drive);
+  drive.connect(hp);
+  hp.connect(scoop);
+  scoop.connect(presence);
+  presence.connect(cab);
+  cab.connect(out);
+  out.connect(getCompressor(ctx));
+  exciteDelay(ctx, delay, f, 0.82);
+  const pickLen = Math.floor(ctx.sampleRate * 0.0035);
+  const pickBuf = ctx.createBuffer(1, pickLen, ctx.sampleRate);
+  const pd = pickBuf.getChannelData(0);
+  for (let i = 0; i < pickLen; i++)
+    pd[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / pickLen, 4);
+  const pick = ctx.createBufferSource();
+  pick.buffer = pickBuf;
+  const pickG = ctx.createGain();
+  pickG.gain.value = vol * 0.22;
+  const pickHp = ctx.createBiquadFilter();
+  pickHp.type = "highpass";
+  pickHp.frequency.value = 1200;
+  pick.connect(pickHp);
+  pickHp.connect(pickG);
+  pickG.connect(getCompressor(ctx));
+  pick.start(now);
+  registerVoice({
+    gain: out,
+    fb,
+    released: false,
+    nodes: [delay, loopFilter, fb, drive, hp, scoop, presence, cab, out, pickHp, pickG],
+  });
+}
+
+function releaseAllSound(ctx: AudioContext, synthGain?: GainNode | null) {
+  if (synthGain) fadeGain(synthGain.gain, ctx.currentTime);
+  stopOrgan(ctx);
+  releaseGatedVoices(ctx);
 }
 
 function drawColorGrid(canvas: HTMLCanvasElement, W: number, H: number) {
@@ -337,7 +568,14 @@ function drawColorGrid(canvas: HTMLCanvasElement, W: number, H: number) {
     }
 }
 
-const INSTRUMENTS = ["Synth", "Piano", "Bass", "Organ"] as const;
+const INSTRUMENTS = [
+  "Synth",
+  "Piano",
+  "Bass",
+  "Acoustic Guitar",
+  "Electric Guitar",
+  "Organ",
+] as const;
 type Instrument = (typeof INSTRUMENTS)[number];
 
 function getAudioContextClass() {
@@ -379,9 +617,14 @@ function InstrumentBar({
       <button
         type="button"
         onClick={onUploadClick}
-        className="instrument-btn instrument-btn--idle"
+        className="upload-btn"
+        aria-label="Add image"
       >
-        IMG
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3.25" y="5.25" width="17.5" height="13.5" />
+          <circle cx="8.4" cy="9.7" r="1.35" />
+          <path d="M3.25 16.4 L8.8 11.6 L12.7 15 L16.2 12.6 L20.75 16.6" />
+        </svg>
       </button>
       <input
         ref={fileInputRef}
@@ -412,6 +655,9 @@ export default function App() {
 
   useEffect(() => {
     instrumentRef.current = instrument;
+    const ctx = audioCtxRef.current;
+    if (ctx) releaseAllSound(ctx, gainRef.current);
+    lastNoteTime.current = {};
   }, [instrument]);
 
   const redrawCanvas = useCallback((W: number, H: number) => {
@@ -548,64 +794,108 @@ export default function App() {
     if (inst === "Synth") playSynth(ctx, freq, s, l, nodes);
     else if (inst === "Piano") playPiano(ctx, freq, s, l, lastNoteTime.current);
     else if (inst === "Bass") playBass(ctx, freq, s, l, lastNoteTime.current);
+    else if (inst === "Acoustic Guitar")
+      playAcousticGuitar(ctx, freq, s, l, lastNoteTime.current);
+    else if (inst === "Electric Guitar")
+      playElectricGuitar(ctx, freq, s, l, lastNoteTime.current);
     else if (inst === "Organ") playOrgan(ctx, freq, s, l, lastNoteTime.current);
   }, []);
 
   const silenceAll = useCallback(() => {
     if (!audioCtxRef.current) return;
-    const ctx = audioCtxRef.current;
-    gainRef.current?.gain.setTargetAtTime(0, ctx.currentTime, 0.1);
-    stopOrgan(ctx);
+    releaseAllSound(audioCtxRef.current, gainRef.current);
   }, []);
 
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      initAudio();
-      triggerFromPixel(e.clientX, e.clientY);
-    },
-    [initAudio, triggerFromPixel],
-  );
-  const handleMouseMove = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.buttons > 0) triggerFromPixel(e.clientX, e.clientY);
-    },
-    [triggerFromPixel],
-  );
-  const handleMouseLeave = useCallback(() => silenceAll(), [silenceAll]);
+  const activePointerRef = useRef<number | null>(null);
 
-  const handleTouchStart = useCallback(
-    (e: React.TouchEvent) => {
-      e.preventDefault();
-      initAudio();
-      const t = e.touches[0];
-      triggerFromPixel(t.clientX, t.clientY);
-    },
-    [initAudio, triggerFromPixel],
-  );
-  const handleTouchMove = useCallback(
-    (e: React.TouchEvent) => {
-      e.preventDefault();
-      const t = e.touches[0];
-      triggerFromPixel(t.clientX, t.clientY);
-    },
-    [triggerFromPixel],
-  );
-  const handleTouchEnd = useCallback(
-    (e: React.TouchEvent) => {
-      e.preventDefault();
+  const endPointer = useCallback(
+    (pointerId?: number) => {
+      if (
+        pointerId !== undefined &&
+        activePointerRef.current !== pointerId
+      )
+        return;
+      activePointerRef.current = null;
       silenceAll();
     },
     [silenceAll],
   );
 
+  useEffect(() => {
+    const onBlur = () => endPointer();
+    const onVisibility = () => {
+      if (document.hidden) endPointer();
+    };
+    const onWindowPointerUp = (e: PointerEvent) => endPointer(e.pointerId);
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pointerup", onWindowPointerUp);
+    window.addEventListener("pointercancel", onWindowPointerUp);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pointerup", onWindowPointerUp);
+      window.removeEventListener("pointercancel", onWindowPointerUp);
+    };
+  }, [endPointer]);
+
+  const handlePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      if (!e.isPrimary) return;
+      e.preventDefault();
+      activePointerRef.current = e.pointerId;
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        /* capture unsupported */
+      }
+      initAudio();
+      triggerFromPixel(e.clientX, e.clientY);
+    },
+    [initAudio, triggerFromPixel],
+  );
+
+  const handlePointerMove = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      if (!e.isPrimary) return;
+      if (activePointerRef.current !== e.pointerId) return;
+      if (e.buttons === 0) {
+        endPointer(e.pointerId);
+        return;
+      }
+      triggerFromPixel(e.clientX, e.clientY);
+    },
+    [endPointer, triggerFromPixel],
+  );
+
+  const handlePointerEnd = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      if (!e.isPrimary) return;
+      if (
+        e.type !== "lostpointercapture" &&
+        activePointerRef.current !== null &&
+        activePointerRef.current !== e.pointerId
+      )
+        return;
+      try {
+        if (e.currentTarget.hasPointerCapture(e.pointerId))
+          e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        /* already released */
+      }
+      endPointer(e.pointerId);
+    },
+    [endPointer],
+  );
+
   const canvasProps = {
     ref: canvasRef,
-    onMouseDown: handleMouseDown,
-    onMouseMove: handleMouseMove,
-    onMouseLeave: handleMouseLeave,
-    onTouchStart: handleTouchStart,
-    onTouchMove: handleTouchMove,
-    onTouchEnd: handleTouchEnd,
+    onPointerDown: handlePointerDown,
+    onPointerMove: handlePointerMove,
+    onPointerUp: handlePointerEnd,
+    onPointerCancel: handlePointerEnd,
+    onPointerLeave: handlePointerEnd,
+    onLostPointerCapture: handlePointerEnd,
     style: {
       touchAction: "none" as const,
       userSelect: "none" as const,

@@ -24,6 +24,7 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -37,12 +38,13 @@ button {
   text-transform: uppercase;
   height: 30px;
   min-width: 44px;
-  padding: 0 6px;
+  padding: 0 8px;
   border-radius: 0;
   cursor: pointer;
   box-shadow: none;
   outline: none;
   background-image: none;
+  white-space: nowrap;
   transition: color 140ms ease, border-color 140ms ease;
 }
 
@@ -61,4 +63,37 @@ button {
   background: #fff;
   color: #000;
   border: 1px solid #fff;
+}
+
+.upload-btn {
+  appearance: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.82;
+  transition: opacity 140ms ease;
+}
+
+.upload-btn:hover {
+  opacity: 1;
+}
+
+.upload-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.25;
+  stroke-linejoin: round;
+  stroke-linecap: round;
 }
