@@ -639,6 +639,7 @@ function InstrumentBar({
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasWrapRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const oscRef = useRef<OscillatorNode | null>(null);
@@ -672,42 +673,62 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
-    const onResize = () => {
-      const land = window.innerWidth > window.innerHeight;
-      setIsLandscape(land);
-      const W = land ? window.innerWidth : Math.min(window.innerWidth, 640);
-      const H = land
-        ? window.innerHeight
-        : Math.round(Math.min(window.innerWidth, 640) * 0.625);
-      redrawCanvas(W, H);
-    };
-    onResize();
-    window.addEventListener("resize", onResize);
-    window.addEventListener("orientationchange", () =>
-      setTimeout(onResize, 120),
-    );
-    return () => window.removeEventListener("resize", onResize);
+  const syncCanvasToContainer = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const wrap = canvasWrapRef.current;
+    if (wrap && wrap.clientWidth > 0 && wrap.clientHeight > 0) {
+      redrawCanvas(
+        Math.max(1, Math.round(wrap.clientWidth)),
+        Math.max(1, Math.round(wrap.clientHeight)),
+      );
+      return;
+    }
+    const W = Math.min(window.innerWidth, 640);
+    redrawCanvas(W, Math.round(W * 0.625));
   }, [redrawCanvas]);
 
   useEffect(() => {
-    document.body.style.overflow = isLandscape ? "hidden" : "";
-    document.documentElement.style.overflow = isLandscape ? "hidden" : "";
-    return () => {
-      document.body.style.overflow = "";
-      document.documentElement.style.overflow = "";
+    const applyViewport = () => {
+      const vv = window.visualViewport;
+      const height = vv?.height ?? window.innerHeight;
+      const top = vv?.offsetTop ?? 0;
+      const root = document.documentElement;
+      root.style.setProperty("--vvh", `${height}px`);
+      root.style.setProperty("--vv-top", `${top}px`);
+      setIsLandscape(window.innerWidth > window.innerHeight);
     };
-  }, [isLandscape]);
+    applyViewport();
+    window.addEventListener("resize", applyViewport);
+    const onOrientation = () => {
+      applyViewport();
+      window.setTimeout(applyViewport, 160);
+    };
+    window.addEventListener("orientationchange", onOrientation);
+    const vv = window.visualViewport;
+    vv?.addEventListener("resize", applyViewport);
+    vv?.addEventListener("scroll", applyViewport);
+    return () => {
+      window.removeEventListener("resize", applyViewport);
+      window.removeEventListener("orientationchange", onOrientation);
+      vv?.removeEventListener("resize", applyViewport);
+      vv?.removeEventListener("scroll", applyViewport);
+    };
+  }, []);
 
   useEffect(() => {
-    const W = isLandscape
-      ? window.innerWidth
-      : Math.min(window.innerWidth, 640);
-    const H = isLandscape
-      ? window.innerHeight
-      : Math.round(Math.min(window.innerWidth, 640) * 0.625);
-    redrawCanvas(W, H);
-  }, [isLandscape, redrawCanvas]);
+    if (!isLandscape) {
+      const W = Math.min(window.innerWidth, 640);
+      redrawCanvas(W, Math.round(W * 0.625));
+      return;
+    }
+    const wrap = canvasWrapRef.current;
+    if (!wrap) return;
+    const ro = new ResizeObserver(() => syncCanvasToContainer());
+    ro.observe(wrap);
+    syncCanvasToContainer();
+    return () => ro.disconnect();
+  }, [isLandscape, redrawCanvas, syncCanvasToContainer]);
 
   const initAudio = useCallback(() => {
     if (audioReadyRef.current) return;
@@ -747,10 +768,7 @@ export default function App() {
       const img = new Image();
       img.onload = () => {
         userImageRef.current = img;
-        const land = window.innerWidth > window.innerHeight;
-        const W = land ? window.innerWidth : Math.min(window.innerWidth, 640);
-        const H = land ? window.innerHeight : Math.round(W * 0.625);
-        redrawCanvas(W, H);
+        syncCanvasToContainer();
       };
       img.src = ev.target?.result as string;
     };
@@ -907,32 +925,8 @@ export default function App() {
 
   if (isLandscape) {
     return (
-      <div
-        style={{
-          position: "fixed",
-          inset: 0,
-          width: "100vw",
-          height: "100dvh",
-          background: "#000",
-          overflow: "hidden",
-          touchAction: "none",
-        }}
-      >
-        <div
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            right: 0,
-            zIndex: 20,
-            display: "flex",
-            padding: "5px 8px",
-            background: "rgba(0,0,0,0.6)",
-            justifyContent: "center",
-            alignItems: "center",
-            backdropFilter: "blur(4px)",
-          }}
-        >
+      <div className="app-landscape">
+        <div className="app-landscape__toolbar">
           <InstrumentBar
             instrument={instrument}
             onSelect={setInstrument}
@@ -942,38 +936,18 @@ export default function App() {
           />
         </div>
 
-        <canvas
-          {...canvasProps}
-          style={{
-            ...canvasProps.style,
-            position: "absolute",
-            inset: 0,
-            width: "100vw",
-            height: "100dvh",
-            objectFit: "cover",
-          }}
-        />
+        <div className="app-landscape__canvas" ref={canvasWrapRef}>
+          <canvas
+            {...canvasProps}
+            style={{
+              ...canvasProps.style,
+              width: "100%",
+              height: "100%",
+            }}
+          />
+        </div>
 
-        <div
-          style={{
-            position: "absolute",
-            bottom: 0,
-            left: 0,
-            right: 0,
-            zIndex: 20,
-            display: "flex",
-            gap: 14,
-            padding: "5px 14px",
-            background: "rgba(0,0,0,0.55)",
-            backdropFilter: "blur(4px)",
-            justifyContent: "center",
-            alignItems: "center",
-            fontFamily: "'Inter',sans-serif",
-            fontSize: 11,
-            color: "#888",
-            letterSpacing: "0.06em",
-          }}
-        >
+        <div className="app-landscape__info">
           {info ? (
             <>
               <span style={{ color: "#fff", fontWeight: 700, fontSize: 13 }}>
@@ -1006,6 +980,7 @@ export default function App() {
 
   return (
     <div
+      className="app-portrait"
       style={{
         minHeight: "100vh",
         background: "#0e0e0e",
